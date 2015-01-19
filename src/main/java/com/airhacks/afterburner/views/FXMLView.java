@@ -19,27 +19,26 @@ package com.airhacks.afterburner.views;
  * limitations under the License.
  * #L%
  */
-import com.airhacks.afterburner.injection.InjectionProvider;
+import com.airhacks.afterburner.injection.Injector;
 import java.io.IOException;
 import java.net.URL;
 import java.util.MissingResourceException;
 import java.util.ResourceBundle;
 import static java.util.ResourceBundle.getBundle;
-import java.util.concurrent.Callable;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.FutureTask;
-import java.util.logging.Level;
-import java.util.logging.Logger;
-import javafx.application.Application;
+import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.function.Supplier;
 import javafx.application.Platform;
+import javafx.beans.property.ObjectProperty;
+import javafx.beans.property.SimpleObjectProperty;
+import javafx.beans.value.ObservableValue;
 import javafx.collections.ObservableList;
 import javafx.fxml.FXMLLoader;
 import javafx.scene.Node;
 import javafx.scene.Parent;
-import javafx.util.Callback;
 
 /**
  * @author adam-bien.com
@@ -47,29 +46,47 @@ import javafx.util.Callback;
 public abstract class FXMLView {
 
     public final static String DEFAULT_ENDING = "view";
+    protected ObjectProperty<Object> presenterProperty;
     protected FXMLLoader fxmlLoader;
-    private static final ExecutorService THREAD_POOL = Executors.newCachedThreadPool();
-    private ResourceBundle bundle;
+    protected String bundleName;
+    protected ResourceBundle bundle;
+    protected final Function<String, Object> injectionContext;
+    protected URL resource;
+    protected final static Executor PARENT_CREATION_POOL = Executors.newCachedThreadPool(runnable -> {
+        Thread thread = Executors.defaultThreadFactory().newThread(runnable);
+        thread.setDaemon(true);
+        return thread;
+    });
 
+    /**
+     * Constructs the view lazily (fxml is not loaded) with empty injection
+     * context.
+     */
     public FXMLView() {
+        this(f -> null);
+    }
+
+    /**
+     *
+     * @param injectionContext the function is used as a injection source.
+     * Values matching for the keys are going to be used for injection into the
+     * corresponding presenter.
+     */
+    public FXMLView(Function<String, Object> injectionContext) {
+        this.injectionContext = injectionContext;
         this.init(getClass(), getFXMLName());
     }
 
     private void init(Class clazz, final String conventionalName) {
-        final URL resource = clazz.getResource(conventionalName);
-        String bundleName = getBundleName();
+        this.presenterProperty = new SimpleObjectProperty<>();
+        this.resource = clazz.getResource(conventionalName);
+        this.bundleName = getBundleName();
         this.bundle = getResourceBundle(bundleName);
-        this.fxmlLoader = loadSynchronously(resource, bundle, conventionalName);
     }
 
     FXMLLoader loadSynchronously(final URL resource, ResourceBundle bundle, final String conventionalName) throws IllegalStateException {
         final FXMLLoader loader = new FXMLLoader(resource, bundle);
-        loader.setControllerFactory(new Callback<Class<?>, Object>() {
-            @Override
-            public Object call(Class<?> p) {
-                return InjectionProvider.instantiatePresenter(p);
-            }
-        });
+        loader.setControllerFactory((Class<?> p) -> Injector.instantiatePresenter(p, this.injectionContext));
         try {
             loader.load();
         } catch (IOException ex) {
@@ -78,10 +95,47 @@ public abstract class FXMLView {
         return loader;
     }
 
+    void initializeFXMLLoader() {
+        if (this.fxmlLoader == null) {
+            this.fxmlLoader = this.loadSynchronously(resource, bundle, bundleName);
+            this.presenterProperty.set(this.fxmlLoader.getController());
+        }
+    }
+
+    /**
+     * Initializes the view by loading the FXML (if not happened yet) and
+     * returns the top Node (parent) specified in
+     *
+     * @return
+     */
     public Parent getView() {
-        Parent parent = getLoader().getRoot();
+        this.initializeFXMLLoader();
+        Parent parent = fxmlLoader.getRoot();
         addCSSIfAvailable(parent);
         return parent;
+    }
+
+    /**
+     * Initializes the view synchronously and invokes and passes the created
+     * parent Node to the consumer within the FX UI thread.
+     *
+     * @param consumer - an object interested in received the Parent as callback
+     */
+    public void getView(Consumer<Parent> consumer) {
+        Supplier<Parent> supplier = this::getView;
+        Executor fxExecutor = Platform::runLater;
+        CompletableFuture.supplyAsync(supplier, fxExecutor).thenAccept(consumer);
+    }
+
+    /**
+     * Creates the view asynchronously using an internal thread pool and passes
+     * the parent node withing the UI Thread.
+     *
+     *
+     * @param consumer - an object interested in received the Parent as callback
+     */
+    public void getViewAsync(Consumer<Parent> consumer) {
+        PARENT_CREATION_POOL.execute(() -> getView(consumer));
     }
 
     /**
@@ -112,14 +166,42 @@ public abstract class FXMLView {
         return getConventionalName(".css");
     }
 
+    /**
+     * In case the view was not initialized yet, the conventional fxml
+     * (airhacks.fxml for the AirhacksView and AirhacksPresenter) are loaded and
+     * the specified presenter / controller is going to be constructed and
+     * returned.
+     *
+     * @return the corresponding controller / presenter (usually for a
+     * AirhacksView the AirhacksPresenter)
+     */
     public Object getPresenter() {
-        return this.getLoader().getController();
+        this.initializeFXMLLoader();
+        return this.presenterProperty.get();
+    }
+
+    /**
+     * Does not initialize the view. Only registers the Consumer and waits until
+     * the the view is going to be created / the method FXMLView#getView or
+     * FXMLView#getViewAsync invoked.
+     *
+     * @param presenterConsumer listener for the presenter construction
+     */
+    public void getPresenter(Consumer<Object> presenterConsumer) {
+        this.presenterProperty.addListener((ObservableValue<? extends Object> o, Object oldValue, Object newValue) -> {
+            presenterConsumer.accept(newValue);
+        });
     }
 
     String getConventionalName(String ending) {
         return getConventionalName() + ending;
     }
 
+    /**
+     *
+     * @return the name of the view without the "View" prefix in lowerCase. For
+     * AirhacksView just airhacks is going to be returned.
+     */
     String getConventionalName() {
         String clazz = this.getClass().getSimpleName().toLowerCase();
         return stripEnding(clazz);
@@ -138,6 +220,11 @@ public abstract class FXMLView {
         return clazz.substring(0, viewIndex);
     }
 
+    /**
+     *
+     * @return the name of the fxml file derived from the FXML view. e.g. The
+     * name for the AirhacksView is going to be airhacks.fxml.
+     */
     final String getFXMLName() {
         return getConventionalName(".fxml");
     }
@@ -158,7 +245,4 @@ public abstract class FXMLView {
         return this.bundle;
     }
 
-    FXMLLoader getLoader() {
-        return this.fxmlLoader;
-    }
 }

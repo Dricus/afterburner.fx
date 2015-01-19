@@ -1,5 +1,5 @@
 /*
- * Copyright 2013 Adam Bien.
+ * Copyright 2014 Adam Bien.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,13 +13,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package com.airhacks.afterburner.views;
+package com.airhacks.afterburner.injection;
 
 /*
  * #%L
  * afterburner.fx
  * %%
- * Copyright (C) 2013 Adam Bien
+ * Copyright (C) 2013 - 2014 Adam Bien
  * %%
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -34,20 +34,20 @@ package com.airhacks.afterburner.views;
  * limitations under the License.
  * #L%
  */
-import java.util.ResourceBundle;
-import static org.junit.Assert.assertNull;
-import org.junit.Test;
+
+import javax.inject.Inject;
 
 /**
  *
- * @author adam-bien.com
+ * @author airhacks.com
  */
-public class FXMLViewTest {
+public class PresenterWithField {
 
-    @Test
-    public void loadNonExistingBundle() {
-        ResourceBundle loaded = FXMLView.getResourceBundle("non-existing");
-        assertNull(loaded);
+    @Inject
+    private String name;
+
+    public String getName() {
+        return name;
     }
 
 }
